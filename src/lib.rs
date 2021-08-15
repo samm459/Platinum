@@ -1,820 +1,424 @@
 #[allow(dead_code)]
 mod diagnostics {
+    pub type At = (usize, usize, usize);
+    pub type Diagnostics = Vec<Report>;
+
     #[derive(Clone, Debug, PartialEq)]
     pub enum Stage {
         Syntax,
     }
 
     #[derive(Clone, Debug, PartialEq)]
-    pub struct Message {
-        pub stage: Stage,
-        pub position: usize,
-        pub line: usize,
-        pub offset: usize,
-        pub text: String,
-    }
-
-    #[derive(Clone, Debug, PartialEq)]
     pub enum Report {
-        Error(Message),
-        Warning(Message),
-    }
-
-    #[derive(Debug)]
-    pub struct Diagnostics {
-        pub reports: Vec<Report>,
-    }
-
-    impl Diagnostics {
-        pub fn new() -> Diagnostics {
-            Diagnostics { reports: vec![] }
-        }
+        Error(At, Stage, String),
+        Warning(At, Stage, String),
     }
 }
 
 #[allow(dead_code)]
 mod lexer {
-    use crate::diagnostics::{Diagnostics, Message, Report, Stage};
+    use crate::diagnostics::{At, Diagnostics, Report, Stage};
 
     #[derive(Clone, PartialEq, Debug)]
-    enum Syntax {
-        Space,
-        Line,
-        Numeric,
-        Alphanum,
-        True,
-        False,
-        OpenParenthesis,
-        CloseParenthesis,
-        Fn,
-        OpenBrackets,
-        CloseBrackets,
-        Return,
-        Plus,
-        Minus,
-        Slash,
-        Star,
-        Percent,
-        DoubleAmp,
-        DoublePipe,
-        If,
-        Bang,
-        BangEq,
-        DoubleEq,
-        Eq,
-        Bad,
+    pub enum Syntax {
+        Space(At, String),
+        Numeric(At, String, u32),
+        Alphanum(At, String),
+        Bool(At, bool),
+        OpenP(At),
+        CloseP(At),
+        Fn(At),
+        OpenB(At),
+        CloseB(At),
+        Return(At),
+        Plus(At),
+        Minus(At),
+        Slash(At),
+        Star(At),
+        Percent(At),
+        DoubleAmp(At),
+        DoublePipe(At),
+        If(At),
+        Bang(At),
+        BangEq(At),
+        DoubleEq(At),
+        Eq(At),
+        Line(At),
+        Bad(At, u8),
     }
 
-    #[derive(Clone, PartialEq, Debug)]
-    enum Value {
-        Number(i32),
-        Boolean(bool),
-        String(String),
-        None,
+    impl Syntax {
+        fn from_word(text: String, at: At) -> Syntax {
+            let s = text.as_str();
+            println!("{}", s);
+            if s == "true" {
+                Syntax::Bool(at, true)
+            } else if s == "false" {
+                Syntax::Bool(at, false)
+            } else if s == "if" {
+                Syntax::If(at)
+            } else if s == "fn" {
+                Syntax::Fn(at)
+            } else {
+                Syntax::Alphanum(at, String::from(text))
+            }
+        }
+
+        fn text(&self) -> String {
+            match self {
+                Syntax::Space(_, text) => String::from(text),
+                Syntax::Numeric(_, text, _) => String::from(text),
+                Syntax::Alphanum(_, text) => String::from(text),
+                Syntax::Bool(_, val) => match val {
+                    true => String::from("true"),
+                    false => String::from("false"),
+                },
+                Syntax::OpenP(_) => String::from("("),
+                Syntax::CloseP(_) => String::from(")"),
+                Syntax::Fn(_) => String::from("fn"),
+                Syntax::OpenB(_) => String::from("{"),
+                Syntax::CloseB(_) => String::from("}"),
+                Syntax::Return(_) => String::from("->"),
+                Syntax::Plus(_) => String::from("+"),
+                Syntax::Minus(_) => String::from("-"),
+                Syntax::Slash(_) => String::from("/"),
+                Syntax::Star(_) => String::from("*"),
+                Syntax::Percent(_) => String::from("%"),
+                Syntax::DoubleAmp(_) => String::from("&&"),
+                Syntax::DoublePipe(_) => String::from("||"),
+                Syntax::If(_) => String::from("if"),
+                Syntax::Bang(_) => String::from("!"),
+                Syntax::BangEq(_) => String::from("!="),
+                Syntax::DoubleEq(_) => String::from("=="),
+                Syntax::Eq(_) => String::from("="),
+                Syntax::Line(_) => String::from("\n"),
+                Syntax::Bad(_, byte) => {
+                    String::from(std::str::from_utf8(std::slice::from_ref(byte)).unwrap())
+                }
+            }
+        }
+
+        fn length(&self) -> usize {
+            self.text().len()
+        }
     }
 
-    #[derive(Clone, PartialEq, Debug)]
-    struct Token {
-        syntax: Syntax,
-        position: usize,
-        line: usize,
-        offset: usize,
-        text: String,
-        value: Value,
-    }
+    type Stream = Vec<Syntax>;
+    type LexerResult = Result<Stream, (Stream, Diagnostics)>;
 
     #[derive(Debug)]
-    struct Lexer<'a> {
-        src: String,
-        tokens: Vec<Token>,
-        position: usize,
-        line: usize,
-        offset: usize,
-        diagnostics: &'a mut Diagnostics,
+    pub struct Lexer {
+        src: Vec<u8>,
+        pub tokens: Vec<Syntax>,
     }
 
-    impl<'a> Lexer<'a> {
-        fn new(src: &str, diagnostics: &'a mut Diagnostics) -> Lexer<'a> {
+    impl Lexer {
+        pub fn new(src: String) -> Lexer {
             Lexer {
-                src: String::from(src),
+                src: src.into_bytes(),
                 tokens: Vec::new(),
-                position: 0,
-                line: 1,
-                offset: 0,
-                diagnostics,
             }
         }
 
-        fn peek(&self, length: usize) -> char {
-            match self.src.chars().nth(self.position + length) {
-                Some(character) => character,
-                None => '\0',
+        fn peek(&self, position: usize) -> u8 {
+            match self.src.iter().nth(position) {
+                Some(byte) => *byte,
+                None => b'\n',
             }
         }
 
-        fn current(&self) -> char {
-            self.peek(0)
+        fn at(&self, position: usize) -> u8 {
+            self.src[position]
         }
 
-        fn next(&mut self) {
-            self.position += 1;
-            self.offset += 1;
-        }
-
-        fn skip(&mut self, length: usize) -> usize {
-            let position = self.position;
-            self.position += length;
-            self.offset += length;
-            position
-        }
-
-        fn step(&mut self) -> usize {
-            self.skip(1)
-        }
-
-        fn place(&mut self) -> (usize, usize) {
-            (self.offset, self.position)
-        }
-
-        fn is<F>(&mut self, condition: F) -> (String, usize, usize)
+        fn is<F>(&self, position: usize, condition: F) -> String
         where
-            F: Fn(char) -> bool,
+            F: Fn(u8) -> bool,
         {
-            let (offset, position) = self.place();
-            while condition(self.current()) {
-                self.next();
+            let mut length = 0;
+            while condition(self.peek(position + length)) {
+                length += 1;
             }
-            let text = self
-                .src
-                .chars()
-                .skip(position)
-                .take(self.position - position)
-                .collect::<String>();
+            let text = std::str::from_utf8(&self.src[position..position + length]).unwrap();
 
-            (text, offset, position)
+            String::from(text)
         }
 
-        fn keyword(text: String) -> Option<(Syntax, Value)> {
-            if text == "true" {
-                Some((Syntax::True, Value::Boolean(true)))
-            } else if text == "false" {
-                Some((Syntax::False, Value::Boolean(false)))
-            } else if text == "if" {
-                Some((Syntax::If, Value::None))
-            } else if text == "fn" {
-                Some((Syntax::Fn, Value::None))
-            } else {
-                None
+        fn current(&self, at: At) -> Syntax {
+            let (position, _, _) = at;
+            let b = self.at(position);
+
+            match b {
+                b'\n' => Syntax::Line(at),
+                b'(' => Syntax::OpenP(at),
+                b')' => Syntax::CloseP(at),
+                b'{' => Syntax::OpenB(at),
+                b'}' => Syntax::CloseB(at),
+                b'+' => Syntax::Plus(at),
+                b'*' => Syntax::Star(at),
+                b'/' => Syntax::Slash(at),
+                b'%' => Syntax::Percent(at),
+
+                b'-' => match self.peek(position + 1) {
+                    b'>' => Syntax::Return(at),
+                    _ => Syntax::Minus(at),
+                },
+
+                b'=' => match self.peek(position + 1) {
+                    b'=' => Syntax::DoubleEq(at),
+                    _ => Syntax::Eq(at),
+                },
+
+                b'!' => match self.peek(position + 1) {
+                    b'=' => Syntax::BangEq(at),
+                    _ => Syntax::Bang(at),
+                },
+
+                b'&' => match self.peek(position + 1) {
+                    b'&' => Syntax::DoubleAmp(at),
+                    _ => Syntax::Bad(at, b),
+                },
+
+                b'|' => match self.peek(position + 1) {
+                    b'|' => Syntax::DoublePipe(at),
+                    _ => Syntax::Bad(at, b),
+                },
+
+                _ => {
+                    if b.is_ascii_digit() {
+                        let text = self.is(position, |x| x.is_ascii_digit());
+                        let n = text.parse::<u32>().unwrap();
+                        return Syntax::Numeric(at, text.clone(), n);
+                    } else if b == b' ' {
+                        let text = self.is(position, |x| x == b' ');
+                        return Syntax::Space(at, text.clone());
+                    } else if b.is_ascii_alphabetic() {
+                        let text = self.is(position, |x| x.is_ascii_alphanumeric());
+                        return Syntax::from_word(text.clone(), at);
+                    }
+
+                    Syntax::Bad(at, b)
+                }
             }
         }
 
-        fn tokenize(&mut self) -> Token {
-            if self.current() == '\n' {
-                let token = Token {
-                    syntax: Syntax::Line,
-                    text: String::from("\n"),
-                    line: self.line,
-                    offset: self.offset,
-                    value: Value::None,
-                    position: self.step(),
+        fn tokenize(&self) -> LexerResult {
+            let (mut position, mut line, mut offset): At = (0, 1, 0);
+            let at = (position, line, offset);
+            let mut diagnostics = Vec::new();
+            let mut tokens = Vec::new();
+
+            let err = |b: u8| {
+                Report::Error(
+                    at,
+                    Stage::Syntax,
+                    format!("Unknown character {:?}", std::str::from_utf8(&[b]).unwrap()),
+                )
+            };
+
+            while position < self.src.len() {
+                let token = self.current((position, line, offset));
+                match token {
+                    Syntax::Bad(_, b) => {
+                        diagnostics.push(err(b));
+                    }
+                    Syntax::Line(_) => {
+                        line += 1;
+                        offset = 0;
+                    }
+                    _ => (),
                 };
-                self.line += 1;
-                self.offset = 0;
-                token
-            } else if self.current().is_whitespace() {
-                let (text, offset, position) = self.is(|c| c.is_whitespace());
-                Token {
-                    syntax: Syntax::Space,
-                    text: text.clone(),
-                    line: self.line,
-                    offset,
-                    value: Value::None,
-                    position,
-                }
-            } else if self.current().is_numeric() {
-                let (text, offset, position) = self.is(|c| c.is_numeric());
-                Token {
-                    syntax: Syntax::Numeric,
-                    text: text.clone(),
-                    line: self.line,
-                    offset,
-                    value: Value::Number(text.parse().unwrap()),
-                    position,
-                }
-            } else if self.current().is_alphabetic() {
-                let (text, offset, position) = self.is(|c| c.is_alphanumeric());
-                match Lexer::keyword(text.clone()) {
-                    Some((syntax, value)) => Token {
-                        syntax,
-                        text: text.clone(),
-                        line: self.line,
-                        offset,
-                        position,
-                        value,
-                    },
-                    None => Token {
-                        syntax: Syntax::Alphanum,
-                        text: text.clone(),
-                        line: self.line,
-                        offset,
-                        position,
-                        value: Value::None,
-                    },
-                }
-            } else if self.current() == '(' {
-                Token {
-                    syntax: Syntax::OpenParenthesis,
-                    text: String::from("("),
-                    line: self.line,
-                    offset: self.offset,
-                    position: self.step(),
-                    value: Value::None,
-                }
-            } else if self.current() == ')' {
-                Token {
-                    syntax: Syntax::CloseParenthesis,
-                    text: String::from(")"),
-                    line: self.line,
-                    offset: self.offset,
-                    position: self.step(),
-                    value: Value::None,
-                }
-            } else if self.current() == '{' {
-                Token {
-                    syntax: Syntax::OpenBrackets,
-                    text: String::from("{"),
-                    line: self.line,
-                    offset: self.offset,
-                    position: self.step(),
-                    value: Value::None,
-                }
-            } else if self.current() == '}' {
-                Token {
-                    syntax: Syntax::CloseBrackets,
-                    text: String::from("}"),
-                    line: self.line,
-                    offset: self.offset,
-                    position: self.step(),
-                    value: Value::None,
-                }
-            } else if self.current() == '+' {
-                Token {
-                    syntax: Syntax::Plus,
-                    text: String::from("+"),
-                    line: self.line,
-                    offset: self.offset,
-                    position: self.step(),
-                    value: Value::None,
-                }
-            } else if self.current() == '-' {
-                if self.peek(1) == '>' {
-                    Token {
-                        syntax: Syntax::Return,
-                        text: String::from("->"),
-                        line: self.line,
-                        offset: self.offset,
-                        position: self.skip(2),
-                        value: Value::None,
-                    }
-                } else {
-                    Token {
-                        syntax: Syntax::Minus,
-                        text: String::from("-"),
-                        line: self.line,
-                        offset: self.offset,
-                        position: self.step(),
-                        value: Value::None,
-                    }
-                }
-            } else if self.current() == '*' {
-                Token {
-                    syntax: Syntax::Star,
-                    text: String::from("*"),
-                    line: self.line,
-                    offset: self.offset,
-                    position: self.step(),
-                    value: Value::None,
-                }
-            } else if self.current() == '/' {
-                Token {
-                    syntax: Syntax::Slash,
-                    text: String::from("/"),
-                    line: self.line,
-                    offset: self.offset,
-                    position: self.step(),
-                    value: Value::None,
-                }
-            } else if self.current() == '%' {
-                Token {
-                    syntax: Syntax::Percent,
-                    text: String::from("%"),
-                    line: self.line,
-                    offset: self.offset,
-                    position: self.step(),
-                    value: Value::None,
-                }
-            } else if self.current() == '&' && self.peek(1) == '&' {
-                Token {
-                    syntax: Syntax::DoubleAmp,
-                    text: String::from("&&"),
-                    line: self.line,
-                    offset: self.offset,
-                    position: self.skip(2),
-                    value: Value::None,
-                }
-            } else if self.current() == '|' && self.peek(1) == '|' {
-                Token {
-                    syntax: Syntax::DoublePipe,
-                    text: String::from("||"),
-                    line: self.line,
-                    offset: self.offset,
-                    position: self.skip(2),
-                    value: Value::None,
-                }
-            } else if self.current() == '!' {
-                if self.peek(1) == '=' {
-                    Token {
-                        syntax: Syntax::BangEq,
-                        text: String::from("!="),
-                        line: self.line,
-                        offset: self.offset,
-                        position: self.skip(2),
-                        value: Value::None,
-                    }
-                } else {
-                    Token {
-                        syntax: Syntax::Bang,
-                        text: String::from("!"),
-                        line: self.line,
-                        offset: self.offset,
-                        position: self.step(),
-                        value: Value::None,
-                    }
-                }
-            } else if self.current() == '=' {
-                if self.peek(1) == '=' {
-                    Token {
-                        syntax: Syntax::DoubleEq,
-                        text: String::from("=="),
-                        line: self.line,
-                        offset: self.offset,
-                        position: self.skip(2),
-                        value: Value::None,
-                    }
-                } else {
-                    Token {
-                        syntax: Syntax::Eq,
-                        text: String::from("="),
-                        line: self.line,
-                        offset: self.offset,
-                        position: self.step(),
-                        value: Value::None,
-                    }
-                }
+                position += token.length();
+                offset += token.length();
+                tokens.push(token);
+            }
+
+            if diagnostics.is_empty() {
+                Ok(tokens)
             } else {
-                self.diagnostics.reports.push(Report::Error(Message {
-                    stage: Stage::Syntax,
-                    line: self.line,
-                    offset: self.offset,
-                    position: self.position,
-                    text: format!("Unknown character {}", self.current()),
-                }));
-                Token {
-                    syntax: Syntax::Bad,
-                    text: String::from(self.current()),
-                    line: self.line,
-                    offset: self.offset,
-                    value: Value::None,
-                    position: self.step(),
-                }
+                Err((tokens, diagnostics))
             }
         }
 
-        fn lex(&mut self) -> &Self {
-            while self.position < self.src.len() {
-                let token = self.tokenize();
-                self.tokens.push(token);
-            }
-            self
+        pub fn lex(src: String) -> LexerResult {
+            let lexer = Lexer::new(src);
+            lexer.tokenize()
+        }
+
+        pub fn lex_from(src: &str) -> LexerResult {
+            let lexer = Lexer::new(String::from(src));
+            lexer.tokenize()
         }
     }
 
     #[cfg(test)]
     mod tests {
-        use crate::diagnostics::{Diagnostics, Message, Report, Stage};
-        use crate::lexer::{Lexer, Syntax, Token, Value};
+        use crate::diagnostics::{At, Report, Stage};
+        use crate::lexer::{Lexer, Syntax};
 
-        fn token(src: &str, i: usize) -> Token {
-            Lexer::new(src, &mut Diagnostics::new()).lex().tokens[i].clone()
-        }
-
-        fn report(src: &str, i: usize) -> Report {
-            let mut diagnostics = Diagnostics::new();
-            Lexer::new(src, &mut diagnostics).lex();
-            diagnostics.reports[i].clone()
-        }
+        const AT: At = (0, 1, 0);
 
         #[test]
         fn it_lexes_lines() {
-            assert_eq!(
-                token("\n", 0),
-                Token {
-                    syntax: Syntax::Line,
-                    position: 0,
-                    line: 1,
-                    offset: 0,
-                    text: String::from("\n"),
-                    value: Value::None
-                }
-            );
+            assert_eq!(Lexer::lex_from("\n").unwrap()[0], Syntax::Line(AT));
         }
 
         #[test]
         fn it_lexes_space() {
             assert_eq!(
-                Lexer::new(" ", &mut Diagnostics::new()).lex().tokens[0],
-                Token {
-                    syntax: Syntax::Space,
-                    position: 0,
-                    line: 1,
-                    offset: 0,
-                    text: String::from(" "),
-                    value: Value::None
-                }
-            );
+                Lexer::lex_from(" ").unwrap()[0],
+                Syntax::Space(AT, String::from(" "))
+            )
         }
 
         #[test]
         fn it_lexes_numeric() {
             assert_eq!(
-                token("1000", 0),
-                Token {
-                    syntax: Syntax::Numeric,
-                    position: 0,
-                    line: 1,
-                    offset: 0,
-                    text: String::from("1000"),
-                    value: Value::Number(1000)
-                }
-            );
+                Lexer::lex_from("1001").unwrap()[0],
+                Syntax::Numeric(AT, String::from("1001"), 1001)
+            )
         }
 
         #[test]
         fn it_lexes_alphanum() {
             assert_eq!(
-                token("a1b2c3", 0),
-                Token {
-                    syntax: Syntax::Alphanum,
-                    position: 0,
-                    line: 1,
-                    offset: 0,
-                    text: String::from("a1b2c3"),
-                    value: Value::None
-                }
+                Lexer::lex_from("a1b2c3").unwrap()[0],
+                Syntax::Alphanum(AT, String::from("a1b2c3"))
             );
         }
 
         #[test]
         fn it_lexes_true() {
-            assert_eq!(
-                token("true", 0),
-                Token {
-                    syntax: Syntax::True,
-                    position: 0,
-                    line: 1,
-                    offset: 0,
-                    text: String::from("true"),
-                    value: Value::Boolean(true)
-                }
-            );
+            assert_eq!(Lexer::lex_from("true").unwrap()[0], Syntax::Bool(AT, true));
         }
 
         #[test]
         fn it_lexes_false() {
             assert_eq!(
-                token("false", 0),
-                Token {
-                    syntax: Syntax::False,
-                    position: 0,
-                    line: 1,
-                    offset: 0,
-                    text: String::from("false"),
-                    value: Value::Boolean(false)
-                }
+                Lexer::lex_from("false").unwrap()[0],
+                Syntax::Bool(AT, false)
             );
         }
 
         #[test]
         fn it_lexes_open_parenthesis() {
-            assert_eq!(
-                token("(", 0),
-                Token {
-                    syntax: Syntax::OpenParenthesis,
-                    position: 0,
-                    line: 1,
-                    offset: 0,
-                    text: String::from("("),
-                    value: Value::None
-                }
-            );
+            assert_eq!(Lexer::lex_from("(").unwrap()[0], Syntax::OpenP(AT));
         }
 
         #[test]
         fn it_lexes_close_parenthesis() {
-            assert_eq!(
-                token(")", 0),
-                Token {
-                    syntax: Syntax::CloseParenthesis,
-                    position: 0,
-                    line: 1,
-                    offset: 0,
-                    text: String::from(")"),
-                    value: Value::None
-                }
-            );
+            assert_eq!(Lexer::lex_from(")").unwrap()[0], Syntax::CloseP(AT));
         }
 
         #[test]
         fn it_lexes_plus() {
-            assert_eq!(
-                token("+", 0),
-                Token {
-                    syntax: Syntax::Plus,
-                    position: 0,
-                    line: 1,
-                    offset: 0,
-                    text: String::from("+"),
-                    value: Value::None
-                }
-            );
+            assert_eq!(Lexer::lex_from("+").unwrap()[0], Syntax::Plus(AT));
         }
 
         #[test]
         fn it_lexes_minus() {
-            assert_eq!(
-                token("-", 0),
-                Token {
-                    syntax: Syntax::Minus,
-                    position: 0,
-                    line: 1,
-                    offset: 0,
-                    text: String::from("-"),
-                    value: Value::None
-                }
-            );
+            assert_eq!(Lexer::lex_from("-").unwrap()[0], Syntax::Minus(AT));
         }
 
         #[test]
         fn it_lexes_star() {
-            assert_eq!(
-                token("*", 0),
-                Token {
-                    syntax: Syntax::Star,
-                    position: 0,
-                    line: 1,
-                    offset: 0,
-                    text: String::from("*"),
-                    value: Value::None
-                }
-            );
+            assert_eq!(Lexer::lex_from("*").unwrap()[0], Syntax::Star(AT));
         }
 
         #[test]
         fn it_lexes_slash() {
-            assert_eq!(
-                token("/", 0),
-                Token {
-                    syntax: Syntax::Slash,
-                    position: 0,
-                    line: 1,
-                    offset: 0,
-                    text: String::from("/"),
-                    value: Value::None
-                }
-            );
+            assert_eq!(Lexer::lex_from("/").unwrap()[0], Syntax::Slash(AT));
         }
 
         #[test]
         fn it_lexes_percent() {
-            assert_eq!(
-                token("%", 0),
-                Token {
-                    syntax: Syntax::Percent,
-                    position: 0,
-                    line: 1,
-                    offset: 0,
-                    text: String::from("%"),
-                    value: Value::None
-                }
-            );
+            assert_eq!(Lexer::lex_from("%").unwrap()[0], Syntax::Percent(AT));
         }
 
         #[test]
         fn it_lexes_double_amp() {
-            assert_eq!(
-                token("&&", 0),
-                Token {
-                    syntax: Syntax::DoubleAmp,
-                    position: 0,
-                    line: 1,
-                    offset: 0,
-                    text: String::from("&&"),
-                    value: Value::None
-                }
-            );
+            assert_eq!(Lexer::lex_from("&&").unwrap()[0], Syntax::DoubleAmp(AT));
         }
 
         #[test]
         fn it_lexes_double_pipe() {
-            assert_eq!(
-                token("||", 0),
-                Token {
-                    syntax: Syntax::DoublePipe,
-                    position: 0,
-                    line: 1,
-                    offset: 0,
-                    text: String::from("||"),
-                    value: Value::None
-                }
-            );
+            assert_eq!(Lexer::lex_from("||").unwrap()[0], Syntax::DoublePipe(AT));
         }
 
         #[test]
         fn it_lexes_bang() {
-            assert_eq!(
-                token("!", 0),
-                Token {
-                    syntax: Syntax::Bang,
-                    position: 0,
-                    line: 1,
-                    offset: 0,
-                    text: String::from("!"),
-                    value: Value::None
-                }
-            );
+            assert_eq!(Lexer::lex_from("!").unwrap()[0], Syntax::Bang(AT));
         }
 
         #[test]
         fn it_lexes_bang_eq() {
-            assert_eq!(
-                token("!=", 0),
-                Token {
-                    syntax: Syntax::BangEq,
-                    position: 0,
-                    line: 1,
-                    offset: 0,
-                    text: String::from("!="),
-                    value: Value::None
-                }
-            );
+            assert_eq!(Lexer::lex_from("!=").unwrap()[0], Syntax::BangEq(AT));
         }
 
         #[test]
         fn it_lexes_eq() {
-            assert_eq!(
-                token("=", 0),
-                Token {
-                    syntax: Syntax::Eq,
-                    position: 0,
-                    line: 1,
-                    offset: 0,
-                    text: String::from("="),
-                    value: Value::None
-                }
-            );
+            assert_eq!(Lexer::lex_from("=").unwrap()[0], Syntax::Eq(AT));
         }
 
         #[test]
         fn it_lexes_double_eq() {
-            assert_eq!(
-                token("==", 0),
-                Token {
-                    syntax: Syntax::DoubleEq,
-                    position: 0,
-                    line: 1,
-                    offset: 0,
-                    text: String::from("=="),
-                    value: Value::None
-                }
-            );
+            assert_eq!(Lexer::lex_from("==").unwrap()[0], Syntax::DoubleEq(AT));
         }
 
         #[test]
         fn it_lexes_open_brakets() {
-            assert_eq!(
-                token("{", 0),
-                Token {
-                    syntax: Syntax::OpenBrackets,
-                    position: 0,
-                    line: 1,
-                    offset: 0,
-                    text: String::from("{"),
-                    value: Value::None
-                }
-            );
+            assert_eq!(Lexer::lex_from("{").unwrap()[0], Syntax::OpenB(AT));
         }
 
         #[test]
         fn it_lexes_close_brakets() {
-            assert_eq!(
-                token("}", 0),
-                Token {
-                    syntax: Syntax::CloseBrackets,
-                    position: 0,
-                    line: 1,
-                    offset: 0,
-                    text: String::from("}"),
-                    value: Value::None
-                }
-            );
+            assert_eq!(Lexer::lex_from("}").unwrap()[0], Syntax::CloseB(AT));
         }
 
         #[test]
         fn it_lexes_fn() {
-            assert_eq!(
-                token("fn", 0),
-                Token {
-                    syntax: Syntax::Fn,
-                    position: 0,
-                    line: 1,
-                    offset: 0,
-                    text: String::from("fn"),
-                    value: Value::None
-                }
-            );
+            assert_eq!(Lexer::lex_from("fn").unwrap()[0], Syntax::Fn(AT));
         }
 
         #[test]
         fn it_lexes_return() {
-            assert_eq!(
-                token("->", 0),
-                Token {
-                    syntax: Syntax::Return,
-                    position: 0,
-                    line: 1,
-                    offset: 0,
-                    text: String::from("->"),
-                    value: Value::None
-                }
-            );
+            assert_eq!(Lexer::lex_from("->").unwrap()[0], Syntax::Return(AT));
         }
 
         #[test]
         fn it_lexes_if() {
-            assert_eq!(
-                token("if", 0),
-                Token {
-                    syntax: Syntax::If,
-                    position: 0,
-                    line: 1,
-                    offset: 0,
-                    text: String::from("if"),
-                    value: Value::None
-                }
-            );
+            assert_eq!(Lexer::lex_from("if").unwrap()[0], Syntax::If(AT));
         }
 
         #[test]
         fn it_lexes_bad() {
             assert_eq!(
-                token("^", 0),
-                Token {
-                    syntax: Syntax::Bad,
-                    position: 0,
-                    line: 1,
-                    offset: 0,
-                    text: String::from("^"),
-                    value: Value::None
-                }
+                Lexer::lex_from("^").unwrap_err().0[0],
+                Syntax::Bad(AT, b'^')
             );
         }
 
         #[test]
         fn it_handles_positions_lines_and_offsets() {
+            println!("{:?}", Lexer::lex_from("1000\n 1").unwrap());
             assert_eq!(
-                token("1000\n 1", 3),
-                Token {
-                    syntax: Syntax::Numeric,
-                    position: 6,
-                    line: 2,
-                    offset: 1,
-                    text: String::from("1"),
-                    value: Value::Number(1)
-                }
+                Lexer::lex_from("1000\n 1").unwrap()[3],
+                Syntax::Numeric((6, 2, 2), String::from("1"), 1)
             );
         }
 
         #[test]
-        fn it_adds_syntax_errors_to_diagnostics() {
+        fn it_reports_issues() {
             assert_eq!(
-                report("^", 0),
-                Report::Error(Message {
-                    stage: Stage::Syntax,
-                    position: 0,
-                    line: 1,
-                    offset: 0,
-                    text: String::from("Unknown character ^")
-                })
+                Lexer::lex_from("^").unwrap_err(),
+                (
+                    Vec::from([Syntax::Bad(AT, b'^')]),
+                    Vec::from([Report::Error(
+                        AT,
+                        Stage::Syntax,
+                        String::from("Unknown character \"^\"")
+                    )])
+                )
             );
         }
     }
